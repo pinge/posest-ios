@@ -1,0 +1,206 @@
+name: 🍏 LiteRT
+
+# LiteRT iOS published as an immutable GitHub Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: litert-release
+  cancel-in-progress: false
+
+env:
+  LITERT_VERSION: "2.1.6"
+  LITERT_REPO: https://github.com/google-ai-edge/LiteRT.git
+  LITERT_COMMIT: 1461b6b2def31713f5c71446eab844aae05d02e9
+  XCODE_VERSION: "26.1.1"
+
+jobs:
+  build-release:
+    runs-on: macos-26
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - name: Check Release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "litert-${LITERT_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip Release
+        if: steps.check.outputs.exists == 'true'
+        run: echo "Release litert-${LITERT_VERSION} already exists."
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.check.outputs.exists != 'true'
+
+      - name: Xcode Select
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          xcode-select -p
+
+      - name: Toolchain Versions
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-path --sdk iphoneos
+
+      - name: Clean Up
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          df -h /
+          sudo rm -rf /Applications/Xcode_*Beta*.app || true
+          # keep only the pinned Xcode, every other Xcode is ~10+ GB
+          for app in /Applications/Xcode_*.app; do
+            [ "$app" = "$(xcode-select -p | sed 's|/Contents/Developer||')" ] || sudo rm -rf "$app" || true
+          done
+          df -h /
+
+      - name: Install bazelisk + git-lfs
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          brew install bazelisk git-lfs
+          bazelisk version
+
+      - name: Checkout LiteRT
+        if: steps.check.outputs.exists != 'true'
+        env:
+          LITERT_SOURCE_DIR: ${{ github.workspace }}/.build/litert-${{ env.LITERT_VERSION }}-source
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: |
+          mkdir -p .build
+          test ! -e "$LITERT_SOURCE_DIR"
+          git clone \
+            --branch "v${LITERT_VERSION}" \
+            --depth 1 \
+            --filter=blob:none \
+            "${LITERT_REPO}" \
+            "$LITERT_SOURCE_DIR"
+          echo "LITERT_SOURCE_DIR=$LITERT_SOURCE_DIR" >> "$GITHUB_ENV"
+
+      - name: Tag
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          cd "$LITERT_SOURCE_DIR"
+          git describe --tags --exact-match
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "$LITERT_COMMIT"
+
+      - name: Pull Metal Accelerator dylibs
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          cd "$LITERT_SOURCE_DIR"
+          git lfs install --local
+          git lfs pull --include='litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib,litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib'
+          ls -lh litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib \
+            litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib
+          file litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib \
+            litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib
+
+      - name: Build CLiteRT
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          cd "$LITERT_SOURCE_DIR"
+          bazel version
+          echo "BAZEL_VERSION=$(bazel --version)" >> "$GITHUB_ENV"
+          du -sh "$(bazel info output_base)" || true
+          time bazel build -c opt //litert/swift:CLiteRT
+          du -sh "$(bazel info output_base)"
+
+      - name: Release Artifacts
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          ARTIFACT_DIR="${GITHUB_WORKSPACE}/.build/litert-${LITERT_VERSION}-artifacts-$(date +%Y%m%dT%H%M%S)"
+          mkdir -p "$ARTIFACT_DIR"
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
+          cp "$LITERT_SOURCE_DIR/bazel-bin/litert/swift/CLiteRT.xcframework.zip" "$ARTIFACT_DIR/"
+          cp "$LITERT_SOURCE_DIR/litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib" \
+            "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-arm64.dylib"
+          cp "$LITERT_SOURCE_DIR/litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib" \
+            "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-simulator-arm64.dylib"
+          unzip -q "$ARTIFACT_DIR/CLiteRT.xcframework.zip" -d "$ARTIFACT_DIR"
+          printf '%s\n' "$ARTIFACT_DIR"
+          # check well formed .xcframework
+          plutil -p "$ARTIFACT_DIR/CLiteRT.xcframework/Info.plist"
+          find "$ARTIFACT_DIR/CLiteRT.xcframework" -type f -maxdepth 5 -print
+          xcrun lipo -info "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64/CLiteRT.framework/CLiteRT"
+          xcrun lipo -info "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64-simulator/CLiteRT.framework/CLiteRT"
+          # check valid Mach-O binaries
+          xcrun lipo -info "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-arm64.dylib"
+          xcrun lipo -info "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-simulator-arm64.dylib"
+          # bundle Metal accelerator slices as one XCFramework
+          xcodebuild -create-xcframework \
+            -library "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-arm64.dylib" \
+            -library "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-simulator-arm64.dylib" \
+            -output "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework"
+          # check well formed .xcframework
+          plutil -p "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework/Info.plist"
+          find "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" -type f -maxdepth 5 -print
+          find "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" -name '*.dylib' -exec xcrun lipo -info {} \;
+          # zip the XCFramework for distribution. ditto preserves symlinks and resource forks (keepParent keeps the top-level folder)
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" \
+            "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework.zip"
+
+      - name: Release Checksums
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          cd "$ARTIFACT_DIR"
+          shasum -a 256 \
+            CLiteRT.xcframework.zip \
+            LiteRTMetalAccelerator.xcframework.zip \
+            libLiteRtMetalAccelerator-ios-arm64.dylib \
+            libLiteRtMetalAccelerator-ios-simulator-arm64.dylib | tee SHA256SUMS
+          du -sh "$LITERT_SOURCE_DIR" "$ARTIFACT_DIR"
+          cat > "litert-${LITERT_VERSION}.json" <<EOF
+          {
+            "litert_version": "${LITERT_VERSION}",
+            "litert_repo": "${LITERT_REPO}",
+            "litert_commit": "${LITERT_COMMIT}",
+            "bazel": "${BAZEL_VERSION}",
+            "xcode": "$(xcodebuild -version | tr '\n' ' ')",
+            "runner": "${RUNNER_OS} ${RUNNER_ARCH}",
+            "artifacts": [
+              "CLiteRT.xcframework.zip",
+              "LiteRTMetalAccelerator.xcframework.zip",
+              "libLiteRtMetalAccelerator-ios-arm64.dylib",
+              "libLiteRtMetalAccelerator-ios-simulator-arm64.dylib"
+            ]
+          }
+          EOF
+          cat "litert-${LITERT_VERSION}.json"
+
+      - name: GitHub Release
+        if: steps.check.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$ARTIFACT_DIR"
+          shasum -a 256 \
+            CLiteRT.xcframework.zip \
+            LiteRTMetalAccelerator.xcframework.zip \
+            libLiteRtMetalAccelerator-ios-arm64.dylib \
+            libLiteRtMetalAccelerator-ios-simulator-arm64.dylib
+          gh release create "litert-${LITERT_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "LiteRT ${LITERT_VERSION} for iOS" \
+            --notes "Built from ${LITERT_REPO}@${LITERT_COMMIT}. See litert-${LITERT_VERSION}.json and SHA256SUMS." \
+            CLiteRT.xcframework.zip \
+            LiteRTMetalAccelerator.xcframework.zip \
+            libLiteRtMetalAccelerator-ios-arm64.dylib \
+            libLiteRtMetalAccelerator-ios-simulator-arm64.dylib \
+            "litert-${LITERT_VERSION}.json" \
+            SHA256SUMS

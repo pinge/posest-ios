@@ -57,23 +57,6 @@ jobs:
           xcodebuild -version
           xcrun --show-sdk-path --sdk iphoneos
 
-      - name: Clean Up
-        if: steps.check.outputs.exists != 'true'
-        run: |
-          df -h /
-          sudo rm -rf /Applications/Xcode_*Beta*.app || true
-          # keep only the pinned Xcode, every other Xcode is ~10+ GB
-          for app in /Applications/Xcode_*.app; do
-            [ "$app" = "$(xcode-select -p | sed 's|/Contents/Developer||')" ] || sudo rm -rf "$app" || true
-          done
-          df -h /
-
-      - name: System Dependencies
-        if: steps.check.outputs.exists != 'true'
-        run: |
-          brew install bazelisk git-lfs
-          bazelisk version
-
       - name: Checkout LiteRT
         if: steps.check.outputs.exists != 'true'
         env:
@@ -115,7 +98,7 @@ jobs:
         if: steps.check.outputs.exists != 'true'
         run: |
           cd "$LITERT_SOURCE_DIR"
-          time bazel test -c opt //litert/swift:LiteRT_Swift_Tests
+          time bazel test -c opt --test_output=errors //litert/swift:LiteRT_Swift_Tests
 
       - name: Release Artifacts
         if: steps.check.outputs.exists != 'true'

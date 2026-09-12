@@ -41,7 +41,7 @@ jobs:
         if: steps.check.outputs.exists == 'true'
         run: echo "Release litert-${LITERT_VERSION} already exists."
 
-      - name: Checkout
+      - name: Checkout Posest
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: steps.check.outputs.exists != 'true'
 
@@ -68,7 +68,7 @@ jobs:
           done
           df -h /
 
-      - name: Install bazelisk + git-lfs
+      - name: System Dependencies
         if: steps.check.outputs.exists != 'true'
         run: |
           brew install bazelisk git-lfs
@@ -89,19 +89,11 @@ jobs:
             "${LITERT_REPO}" \
             "$LITERT_SOURCE_DIR"
           echo "LITERT_SOURCE_DIR=$LITERT_SOURCE_DIR" >> "$GITHUB_ENV"
-
-      - name: Tag
-        if: steps.check.outputs.exists != 'true'
-        run: |
           cd "$LITERT_SOURCE_DIR"
           git describe --tags --exact-match
           git rev-parse HEAD
           test "$(git rev-parse HEAD)" = "$LITERT_COMMIT"
-
-      - name: Pull Metal Accelerator dylibs
-        if: steps.check.outputs.exists != 'true'
-        run: |
-          cd "$LITERT_SOURCE_DIR"
+          # pull Metal Accelerator dylibs
           git lfs install --local
           git lfs pull --include='litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib,litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib'
           ls -lh litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib \
@@ -118,6 +110,12 @@ jobs:
           du -sh "$(bazel info output_base)" || true
           time bazel build -c opt //litert/swift:CLiteRT
           du -sh "$(bazel info output_base)"
+
+      - name: Test LiteRT
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          cd "$LITERT_SOURCE_DIR"
+          time bazel test -c opt //litert/swift:LiteRT_Swift_Tests
 
       - name: Release Artifacts
         if: steps.check.outputs.exists != 'true'
@@ -165,7 +163,7 @@ jobs:
             libLiteRtMetalAccelerator-ios-arm64.dylib \
             libLiteRtMetalAccelerator-ios-simulator-arm64.dylib | tee SHA256SUMS
           du -sh "$LITERT_SOURCE_DIR" "$ARTIFACT_DIR"
-          cat > "litert-${LITERT_VERSION}.json" <<EOF
+          cat > "LiteRT-${LITERT_VERSION}.json" <<EOF
           {
             "litert_version": "${LITERT_VERSION}",
             "litert_repo": "${LITERT_REPO}",
@@ -181,7 +179,7 @@ jobs:
             ]
           }
           EOF
-          cat "litert-${LITERT_VERSION}.json"
+          cat "LiteRT-${LITERT_VERSION}.json"
 
       - name: GitHub Release
         if: steps.check.outputs.exists != 'true'
@@ -197,10 +195,10 @@ jobs:
           gh release create "litert-${LITERT_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "LiteRT ${LITERT_VERSION} for iOS" \
-            --notes "Built from ${LITERT_REPO}@${LITERT_COMMIT}. See litert-${LITERT_VERSION}.json and SHA256SUMS." \
+            --notes $'📦️ Built from ${LITERT_REPO%.git}/releases/tag/v${LITERT_VERSION}\n📝 See LiteRT-${LITERT_VERSION}.json and verify with SHA256SUMS' \
             CLiteRT.xcframework.zip \
             LiteRTMetalAccelerator.xcframework.zip \
             libLiteRtMetalAccelerator-ios-arm64.dylib \
             libLiteRtMetalAccelerator-ios-simulator-arm64.dylib \
-            "litert-${LITERT_VERSION}.json" \
+            "LiteRT-${LITERT_VERSION}.json" \
             SHA256SUMS

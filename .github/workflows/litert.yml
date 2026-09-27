@@ -127,34 +127,89 @@ jobs:
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/.build/litert-${LITERT_VERSION}-artifacts-$(date +%Y%m%dT%H%M%S)"
           mkdir -p "$ARTIFACT_DIR"
           echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
-          cp "$LITERT_SOURCE_DIR/bazel-bin/litert/swift/CLiteRT.xcframework.zip" "$ARTIFACT_DIR/"
-          cp "$LITERT_SOURCE_DIR/litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib" \
-            "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-arm64.dylib"
-          cp "$LITERT_SOURCE_DIR/litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib" \
-            "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-simulator-arm64.dylib"
-          unzip -q "$ARTIFACT_DIR/CLiteRT.xcframework.zip" -d "$ARTIFACT_DIR"
+          unzip -q "$LITERT_SOURCE_DIR/bazel-bin/litert/swift/CLiteRT.xcframework.zip" \
+            -d "$ARTIFACT_DIR"
           printf '%s\n' "$ARTIFACT_DIR"
+          DEVICE_CLITERT_PLIST="$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64/CLiteRT.framework/Info.plist"
+          SIMULATOR_CLITERT_PLIST="$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64-simulator/CLiteRT.framework/Info.plist"
+          IOS_SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+          plutil -replace CFBundleSupportedPlatforms -json '["iPhoneOS"]' "$DEVICE_CLITERT_PLIST"
+          plutil -replace DTPlatformName -string iphoneos "$DEVICE_CLITERT_PLIST"
+          plutil -replace DTSDKName -string "iphoneos${IOS_SDK_VERSION}" "$DEVICE_CLITERT_PLIST"
+          test "$(plutil -extract CFBundleSupportedPlatforms.0 raw -o - "$DEVICE_CLITERT_PLIST")" = "iPhoneOS"
+          test "$(plutil -extract DTPlatformName raw -o - "$DEVICE_CLITERT_PLIST")" = "iphoneos"
+          test "$(plutil -extract DTSDKName raw -o - "$DEVICE_CLITERT_PLIST")" = "iphoneos${IOS_SDK_VERSION}"
+          ! cmp -s "$DEVICE_CLITERT_PLIST" "$SIMULATOR_CLITERT_PLIST"
           # check well formed .xcframework
           plutil -p "$ARTIFACT_DIR/CLiteRT.xcframework/Info.plist"
           find "$ARTIFACT_DIR/CLiteRT.xcframework" -type f -maxdepth 5 -print
           xcrun lipo -info "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64/CLiteRT.framework/CLiteRT"
           xcrun lipo -info "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64-simulator/CLiteRT.framework/CLiteRT"
+          xcrun vtool -show-build "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64/CLiteRT.framework/CLiteRT" | grep -Eq 'platform[[:space:]]+IOS$'
+          xcrun vtool -show-build "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64-simulator/CLiteRT.framework/CLiteRT" | grep -Eq 'platform[[:space:]]+IOSSIMULATOR$'
+          xcrun nm -gjU "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64/CLiteRT.framework/CLiteRT" | grep -qx '_LiteRtStaticLinkedAcceleratorGpuDef'
+          xcrun nm -gjU "$ARTIFACT_DIR/CLiteRT.xcframework/ios-arm64-simulator/CLiteRT.framework/CLiteRT" | grep -qx '_LiteRtStaticLinkedAcceleratorGpuDef'
+          ditto -c -k --sequesterRsrc --keepParent "$ARTIFACT_DIR/CLiteRT.xcframework" "$ARTIFACT_DIR/CLiteRT.xcframework.zip"
           # check valid Mach-O binaries
-          xcrun lipo -info "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-arm64.dylib"
-          xcrun lipo -info "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-simulator-arm64.dylib"
+          DEVICE_METAL_LIBRARY="$LITERT_SOURCE_DIR/litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib"
+          SIMULATOR_METAL_LIBRARY="$LITERT_SOURCE_DIR/litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib"
+          xcrun lipo -info "$DEVICE_METAL_LIBRARY"
+          xcrun lipo -info "$SIMULATOR_METAL_LIBRARY"
+          xcrun vtool -show-build "$DEVICE_METAL_LIBRARY" | grep -Eq 'platform[[:space:]]+IOS$'
+          xcrun vtool -show-build "$SIMULATOR_METAL_LIBRARY" | grep -Eq 'platform[[:space:]]+IOSSIMULATOR$'
+          make_metal_framework() {
+            local source_library="$1"
+            local source_plist="$2"
+            local framework="$3"
+            local binary="$framework/LiteRTMetalAccelerator"
+            mkdir -p "$framework/Headers" "$framework/Modules"
+            install -m 0755 "$source_library" "$binary"
+            cp "$source_plist" "$framework/Info.plist"
+            plutil -replace CFBundleExecutable -string LiteRTMetalAccelerator "$framework/Info.plist"
+            plutil -replace CFBundleIdentifier -string com.google.odml.litert.LiteRTMetalAccelerator "$framework/Info.plist"
+            plutil -replace CFBundleName -string LiteRTMetalAccelerator "$framework/Info.plist"
+            plutil -replace CFBundleShortVersionString -string "$LITERT_VERSION" "$framework/Info.plist"
+            /usr/bin/codesign --remove-signature "$binary" >/dev/null 2>&1 || true
+            xcrun install_name_tool -id '@rpath/LiteRTMetalAccelerator.framework/LiteRTMetalAccelerator' "$binary"
+            printf '%s\n' '#pragma once' > "$framework/Headers/LiteRTMetalAccelerator.h"
+            printf '%s\n' \
+              'framework module LiteRTMetalAccelerator {' \
+              '  umbrella header "LiteRTMetalAccelerator.h"' \
+              '  export *' \
+              '}' \
+              > "$framework/Modules/module.modulemap"
+          }
+          DEVICE_METAL_FRAMEWORK="$ARTIFACT_DIR/ios-arm64/LiteRTMetalAccelerator.framework"
+          SIMULATOR_METAL_FRAMEWORK="$ARTIFACT_DIR/ios-arm64-simulator/LiteRTMetalAccelerator.framework"
+          make_metal_framework \
+            "$DEVICE_METAL_LIBRARY" \
+            "$DEVICE_CLITERT_PLIST" \
+            "$DEVICE_METAL_FRAMEWORK"
+          make_metal_framework \
+            "$SIMULATOR_METAL_LIBRARY" \
+            "$SIMULATOR_CLITERT_PLIST" \
+            "$SIMULATOR_METAL_FRAMEWORK"
           # bundle Metal accelerator slices as one XCFramework
           xcodebuild -create-xcframework \
-            -library "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-arm64.dylib" \
-            -library "$ARTIFACT_DIR/libLiteRtMetalAccelerator-ios-simulator-arm64.dylib" \
+            -framework "$DEVICE_METAL_FRAMEWORK" \
+            -framework "$SIMULATOR_METAL_FRAMEWORK" \
             -output "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework"
           # check well formed .xcframework
           plutil -p "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework/Info.plist"
           find "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" -type f -maxdepth 5 -print
-          find "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" -name '*.dylib' -exec xcrun lipo -info {} \;
+          xcrun lipo -info "$DEVICE_METAL_FRAMEWORK/LiteRTMetalAccelerator"
+          xcrun lipo -info "$SIMULATOR_METAL_FRAMEWORK/LiteRTMetalAccelerator"
+          test "$(xcrun otool -D "$DEVICE_METAL_FRAMEWORK/LiteRTMetalAccelerator" | tail -n 1)" = '@rpath/LiteRTMetalAccelerator.framework/LiteRTMetalAccelerator'
+          test "$(xcrun otool -D "$SIMULATOR_METAL_FRAMEWORK/LiteRTMetalAccelerator" | tail -n 1)" = '@rpath/LiteRTMetalAccelerator.framework/LiteRTMetalAccelerator'
+          xcrun nm -gjU "$DEVICE_METAL_FRAMEWORK/LiteRTMetalAccelerator" | grep -qx '_LiteRtAcceleratorImpl'
+          xcrun nm -gjU "$SIMULATOR_METAL_FRAMEWORK/LiteRTMetalAccelerator" | grep -qx '_LiteRtAcceleratorImpl'
+          test "$(plutil -p "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework/Info.plist" | grep -c 'LibraryPath.*LiteRTMetalAccelerator.framework')" -eq 2
+          if find "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" -type f -name '*.dylib' -print -quit | grep -q .; then
+            echo 'LiteRTMetalAccelerator.xcframework contains a standalone dylib' >&2
+            exit 1
+          fi
           # zip the XCFramework for distribution. ditto preserves symlinks and resource forks (keepParent keeps the top-level folder)
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" \
-            "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework" "$ARTIFACT_DIR/LiteRTMetalAccelerator.xcframework.zip"
 
       - name: Release Checksums
         if: steps.check.outputs.exists != 'true'
@@ -162,9 +217,7 @@ jobs:
           cd "$ARTIFACT_DIR"
           shasum -a 256 \
             CLiteRT.xcframework.zip \
-            LiteRTMetalAccelerator.xcframework.zip \
-            libLiteRtMetalAccelerator-ios-arm64.dylib \
-            libLiteRtMetalAccelerator-ios-simulator-arm64.dylib | tee SHA256SUMS
+            LiteRTMetalAccelerator.xcframework.zip | tee SHA256SUMS
           du -sh "$LITERT_SOURCE_DIR" "$ARTIFACT_DIR"
           cat > "LiteRT-${LITERT_VERSION}.json" <<EOF
           {
@@ -176,9 +229,7 @@ jobs:
             "runner": "${RUNNER_OS} ${RUNNER_ARCH}",
             "artifacts": [
               "CLiteRT.xcframework.zip",
-              "LiteRTMetalAccelerator.xcframework.zip",
-              "libLiteRtMetalAccelerator-ios-arm64.dylib",
-              "libLiteRtMetalAccelerator-ios-simulator-arm64.dylib"
+              "LiteRTMetalAccelerator.xcframework.zip"
             ]
           }
           EOF
@@ -192,16 +243,12 @@ jobs:
           cd "$ARTIFACT_DIR"
           shasum -a 256 \
             CLiteRT.xcframework.zip \
-            LiteRTMetalAccelerator.xcframework.zip \
-            libLiteRtMetalAccelerator-ios-arm64.dylib \
-            libLiteRtMetalAccelerator-ios-simulator-arm64.dylib
+            LiteRTMetalAccelerator.xcframework.zip
           gh release create "litert-${LITERT_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "LiteRT ${LITERT_VERSION} for iOS" \
             --notes $'📦️ Built from ${LITERT_REPO%.git}/releases/tag/v${LITERT_VERSION}\n📝 See LiteRT-${LITERT_VERSION}.json and verify with SHA256SUMS' \
             CLiteRT.xcframework.zip \
             LiteRTMetalAccelerator.xcframework.zip \
-            libLiteRtMetalAccelerator-ios-arm64.dylib \
-            libLiteRtMetalAccelerator-ios-simulator-arm64.dylib \
             "LiteRT-${LITERT_VERSION}.json" \
             SHA256SUMS

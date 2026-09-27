@@ -247,7 +247,7 @@ jobs:
           gh release create "litert-${LITERT_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "LiteRT ${LITERT_VERSION} for iOS" \
-            --notes $'📦️ Built from ${LITERT_REPO%.git}/releases/tag/v${LITERT_VERSION}\n📝 See LiteRT-${LITERT_VERSION}.json and verify with SHA256SUMS' \
+            --notes "📦️ Built from ${LITERT_REPO%.git}/releases/tag/v${LITERT_VERSION}"$'\n'"📝 See LiteRT-${LITERT_VERSION}.json and verify with SHA256SUMS" \
             CLiteRT.xcframework.zip \
             LiteRTMetalAccelerator.xcframework.zip \
             "LiteRT-${LITERT_VERSION}.json" \

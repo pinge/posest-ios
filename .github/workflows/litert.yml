@@ -175,6 +175,10 @@ jobs:
             plutil -replace CFBundleIdentifier -string com.google.odml.litert.LiteRTMetalAccelerator "$framework/Info.plist"
             plutil -replace CFBundleName -string LiteRTMetalAccelerator "$framework/Info.plist"
             plutil -replace CFBundleShortVersionString -string "$LITERT_VERSION" "$framework/Info.plist"
+            for key in BuildMachineOSBuild DTCompiler DTPlatformBuild DTPlatformName DTPlatformVersion DTSDKBuild DTSDKName DTXcode DTXcodeBuild; do
+              plutil -remove "$key" "$framework/Info.plist"
+            done
+            chmod 0644 "$framework/Info.plist"
             /usr/bin/codesign --remove-signature "$binary" >/dev/null 2>&1 || true
             xcrun install_name_tool -id '@rpath/LiteRTMetalAccelerator.framework/LiteRTMetalAccelerator' "$binary"
             printf '%s\n' '#pragma once' > "$framework/Headers/LiteRTMetalAccelerator.h"

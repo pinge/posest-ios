@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 
+# supports bash 3.2.57 on macos-26 runner.
+
 set -euo pipefail
 
 usage() {
-  printf 'usage: %s <artifact-directory> <LiteRT-version>\n' "${0##*/}" >&2
+  printf 'usage: %s <artifact-directory>\n' "${0##*/}" >&2
   exit 2
 }
 
@@ -165,15 +167,98 @@ validate_clitert_build_metadata() {
   [[ "$sdk_name" == "$expected_sdk_prefix"* ]] || fail "invalid $plist DTSDKName: expected prefix <$expected_sdk_prefix>, got <$sdk_name>"
 }
 
-validate_metal_build_metadata_removed() {
+validate_optional_build_metadata() {
   local plist="$1"
-  local key
+  local expected_platform="$2"
+  local expected_sdk_prefix="$3"
+  local platform_name
+  local sdk_name
 
-  for key in BuildMachineOSBuild DTCompiler DTPlatformBuild DTPlatformName DTPlatformVersion DTSDKBuild DTSDKName DTXcode DTXcodeBuild; do
-    if plist_value "$plist" ":$key" >/dev/null 2>&1; then
-      fail "$plist contains copied build metadata key $key"
-    fi
-  done
+  if platform_name="$(plist_value "$plist" :DTPlatformName 2>/dev/null)"; then
+    assert_equal "$platform_name" "$expected_platform" "$plist DTPlatformName"
+  fi
+  if sdk_name="$(plist_value "$plist" :DTSDKName 2>/dev/null)"; then
+    [[ "$sdk_name" == "$expected_sdk_prefix"* ]] || fail "invalid $plist DTSDKName: expected prefix <$expected_sdk_prefix>, got <$sdk_name>"
+  fi
+}
+
+read_symbol_bytes() {
+  local binary="$1"
+  local symbol="$2"
+  local relative_offset="$3"
+  local byte_count="$4"
+  local symbol_record
+  local symbol_address
+  local symbol_location
+  local segment
+  local section
+  local section_record
+  local section_address
+  local section_offset
+  local file_offset
+
+  symbol_record="$(xcrun nm -nm "$binary" | awk -v symbol="$symbol" '
+    $NF == symbol {
+      address = $1
+      location = $2
+      matches++
+    }
+    END {
+      if (matches == 1) {
+        print address, location
+      } else {
+        exit 1
+      }
+    }
+  ')" || fail "expected one defined $symbol in $binary"
+  read -r symbol_address symbol_location <<< "$symbol_record"
+  segment="${symbol_location#(}"
+  segment="${segment%%,*}"
+  section="${symbol_location#*,}"
+  section="${section%)}"
+
+  section_record="$(xcrun otool -l "$binary" | awk -v expected_segment="$segment" -v expected_section="$section" '
+    $1 == "Load" && $2 == "command" {
+      in_section = 0
+      next
+    }
+    $1 == "Section" {
+      in_section = 1
+      section = ""
+      segment = ""
+      address = ""
+      next
+    }
+    in_section && $1 == "sectname" { section = $2 }
+    in_section && $1 == "segname" { segment = $2 }
+    in_section && $1 == "addr" { address = $2 }
+    in_section && $1 == "offset" && section == expected_section && segment == expected_segment {
+      print address, $2
+      found++
+    }
+    END {
+      if (found != 1) {
+        exit 1
+      }
+    }
+  ')" || fail "unable to locate $segment,$section in $binary"
+  read -r section_address section_offset <<< "$section_record"
+
+  symbol_address="${symbol_address#0x}"
+  section_address="${section_address#0x}"
+  file_offset=$((16#$symbol_address - 16#$section_address + section_offset + relative_offset))
+  od -An -v -t x1 -j "$file_offset" -N "$byte_count" "$binary" | tr -d ' \n'
+}
+
+validate_metal_abi() {
+  local binary="$1"
+  local outer_header
+  local buffer_handlers_header
+
+  outer_header="$(read_symbol_bytes "$binary" _LiteRtAcceleratorImpl 0 8)"
+  buffer_handlers_header="$(read_symbol_bytes "$binary" _LiteRtAcceleratorImpl 64 8)"
+  assert_equal "$outer_header" c800010000000000 "$binary LiteRtAcceleratorImpl ABI header"
+  assert_equal "$buffer_handlers_header" 8800010000000000 "$binary buffer-handlers ABI header"
 }
 
 validate_binary() {
@@ -291,12 +376,11 @@ validate_zip() {
   done
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -eq 1 ]] || usage
 
 artifact_directory="${1%/}"
-litert_version="$2"
+litert_version='2.2.0'
 [[ -n "$artifact_directory" ]] || usage
-[[ -n "$litert_version" ]] || usage
 assert_directory "$artifact_directory"
 
 clitert="$artifact_directory/CLiteRT.xcframework"
@@ -307,8 +391,13 @@ validate_clitert_build_metadata "$clitert/ios-arm64/CLiteRT.framework/Info.plist
 validate_clitert_build_metadata "$clitert/ios-arm64-simulator/CLiteRT.framework/Info.plist" iphonesimulator iphonesimulator
 
 validate_artifact "$metal" LiteRTMetalAccelerator com.google.odml.litert.LiteRTMetalAccelerator "$litert_version" _LiteRtAcceleratorImpl
-validate_metal_build_metadata_removed "$metal/ios-arm64/LiteRTMetalAccelerator.framework/Info.plist"
-validate_metal_build_metadata_removed "$metal/ios-arm64-simulator/LiteRTMetalAccelerator.framework/Info.plist"
+device_metal_framework="$metal/ios-arm64/LiteRTMetalAccelerator.framework"
+simulator_metal_framework="$metal/ios-arm64-simulator/LiteRTMetalAccelerator.framework"
+
+validate_optional_build_metadata "$device_metal_framework/Info.plist" iphoneos iphoneos
+validate_optional_build_metadata "$simulator_metal_framework/Info.plist" iphonesimulator iphonesimulator
+validate_metal_abi "$device_metal_framework/LiteRTMetalAccelerator"
+validate_metal_abi "$simulator_metal_framework/LiteRTMetalAccelerator"
 
 validate_zip "$artifact_directory/CLiteRT.xcframework.zip" CLiteRT
 validate_zip "$artifact_directory/LiteRTMetalAccelerator.xcframework.zip" LiteRTMetalAccelerator

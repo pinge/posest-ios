@@ -4,6 +4,11 @@ name: 🍏 LiteRT
 
 on:
   workflow_dispatch:
+    inputs:
+      litert_version:
+        description: LiteRT release version, see https://github.com/google-ai-edge/LiteRT/releases
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,9 +18,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  LITERT_VERSION: "2.1.6"
+  LITERT_VERSION: ${{ inputs.litert_version }}
   LITERT_REPO: https://github.com/google-ai-edge/LiteRT.git
-  LITERT_COMMIT: 1461b6b2def31713f5c71446eab844aae05d02e9
   XCODE_VERSION: "26.1.1"
 
 jobs:
@@ -26,6 +30,13 @@ jobs:
       run:
         shell: bash -eo pipefail {0}
     steps:
+      - name: LiteRT Version
+        run: |
+          if [[ ! "$LITERT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "LiteRT has no $LITERT_VERSION version" >&2
+            exit 1
+          fi
+
       - name: Check Release
         id: check
         env:
@@ -73,9 +84,9 @@ jobs:
             "$LITERT_SOURCE_DIR"
           echo "LITERT_SOURCE_DIR=$LITERT_SOURCE_DIR" >> "$GITHUB_ENV"
           cd "$LITERT_SOURCE_DIR"
-          git describe --tags --exact-match
-          git rev-parse HEAD
-          test "$(git rev-parse HEAD)" = "$LITERT_COMMIT"
+          test "$(git describe --tags --exact-match HEAD)" = "v${LITERT_VERSION}"
+          LITERT_COMMIT="$(git rev-parse HEAD)"
+          echo "LITERT_COMMIT=$LITERT_COMMIT" >> "$GITHUB_ENV"
           # pull Metal Accelerator dylibs
           git lfs install --local
           git lfs pull --include='litert/prebuilt/ios_arm64/libLiteRtMetalAccelerator.dylib,litert/prebuilt/ios_sim_arm64/libLiteRtMetalAccelerator.dylib'
@@ -98,27 +109,13 @@ jobs:
         if: steps.check.outputs.exists != 'true'
         run: |
           cd "$LITERT_SOURCE_DIR"
-          # testMetalBuffer needs a real GPU and the runner exposes a Metal device but the GPU accelerator plugin fails to register:
-          # <unknown>:0: error: -[litert_swift_LiteRT_Swift_Tests.TensorBufferTests testMetalBuffer] : failed: caught error: "Not found"
-          set +e
-          time bazel test -c opt --test_output=all //litert/swift:LiteRT_Swift_Tests >"${GITHUB_WORKSPACE}/.build/swift-test-output.log" 2>&1
-          STATUS=$?
-          set -e
-          if [ $STATUS -eq 0 ]; then
-            echo "All LiteRT Swift tests passed"
-            exit 0
-          fi
-          OTHER_FAILURES=$(grep "^Test Case .* failed" "${GITHUB_WORKSPACE}/.build/swift-test-output.log" | grep -v "testMetalBuffer" || true)
-          if [ -n "$OTHER_FAILURES" ]; then
-            echo "LiteRT Swift tests failed beyond the known testMetalBuffer:"
-            echo "$OTHER_FAILURES"
-            exit 1
-          fi
-          grep -q "^Test Case .*testMetalBuffer.* failed" "${GITHUB_WORKSPACE}/.build/swift-test-output.log" || {
-            echo "bazel failed without the testMetalBuffer error. See swift-test-output.log"
-            exit 1
-          }
-          echo "All LiteRT Swift tests passed except know 'testMetalBuffer' failure (runner has no GPU)"
+          TEST_FILE=litert/swift/Tests/TensorBufferTests.swift
+          test "$(grep -c '^  func testMetalBuffer() throws {$' "$TEST_FILE")" -eq 1
+          sed -i '' \
+            's/^  func testMetalBuffer() throws {$/  func disabledTestMetalBuffer() throws {/' \
+            "$TEST_FILE"
+          grep -q '^  func disabledTestMetalBuffer() throws {$' "$TEST_FILE"
+          time bazel test -c opt --test_output=all //litert/swift:LiteRT_Swift_Tests
 
       - name: Release Artifacts
         if: steps.check.outputs.exists != 'true'
